@@ -76,6 +76,7 @@ use TheCodingMachine\GraphQLite\Types\ArgumentResolver;
 use TheCodingMachine\GraphQLite\Types\InputTypeValidatorInterface;
 use TheCodingMachine\GraphQLite\Types\TypeResolver;
 use TheCodingMachine\GraphQLite\Utils\DescriptionResolver;
+use TheCodingMachine\GraphQLite\Utils\FieldAccessorPrefixes;
 use TheCodingMachine\GraphQLite\Utils\NamespacedCache;
 
 use function array_reverse;
@@ -120,6 +121,8 @@ class SchemaFactory
     private InputTypeValidatorInterface|null $inputTypeValidator = null;
 
     private NamingStrategyInterface|null $namingStrategy = null;
+
+    private FieldAccessorPrefixes|null $fieldAccessorPrefixes = null;
 
     private ClassFinder|FinderInterface|null $finder = null;
 
@@ -281,6 +284,23 @@ class SchemaFactory
         return $this;
     }
 
+    /**
+     * Configures the method-name prefixes stripped to derive field names and matched when resolving
+     * property accessors. Getter prefixes map read methods to output fields; setter prefixes map
+     * write methods to input fields. A prefix is only stripped on a camelCase boundary, so
+     * "isEnabled" becomes "enabled" while "issue" is left untouched. The defaults preserve
+     * GraphQLite's historical behavior.
+     *
+     * @param list<string> $getters
+     * @param list<string> $setters
+     */
+    public function stripFieldPrefixes(array $getters = ['get', 'is'], array $setters = ['set']): self
+    {
+        $this->fieldAccessorPrefixes = new FieldAccessorPrefixes($getters, $setters);
+
+        return $this;
+    }
+
     public function setSchemaConfig(SchemaConfig $schemaConfig): self
     {
         $this->schemaConfig = $schemaConfig;
@@ -399,7 +419,8 @@ class SchemaFactory
             PhpDocumentorDocBlockFactory::default(),
         );
         $descriptionResolver = new DescriptionResolver($this->useDocblockDescriptions);
-        $namingStrategy = $this->namingStrategy ?: new NamingStrategy();
+        $fieldAccessorPrefixes = $this->fieldAccessorPrefixes ?? new FieldAccessorPrefixes();
+        $namingStrategy = $this->namingStrategy ?: new NamingStrategy($fieldAccessorPrefixes);
         $typeRegistry = new TypeRegistry();
         $classFinder = $this->createClassFinder();
         $classFinderComputedCache = $this->devMode ?
@@ -408,6 +429,8 @@ class SchemaFactory
 
         $expressionLanguage = $this->expressionLanguage ?: new ExpressionLanguage($symfonyCache);
         $expressionLanguage->registerProvider(new SecurityExpressionLanguageProvider());
+
+        $callableResolver = new CallableResolver($this->container);
 
         $directiveRegistry = new DirectiveRegistry(
             $annotationReader,
@@ -422,7 +445,7 @@ class SchemaFactory
             $fieldMiddlewarePipe->pipe($fieldMiddleware);
         }
         // TODO: add a logger to the SchemaFactory and make use of it everywhere (and most particularly in SecurityFieldMiddleware)
-        $fieldMiddlewarePipe->pipe(new SecurityFieldMiddleware($expressionLanguage, $authenticationService, $authorizationService));
+        $fieldMiddlewarePipe->pipe(new SecurityFieldMiddleware($expressionLanguage, $authenticationService, $authorizationService, $callableResolver));
         $fieldMiddlewarePipe->pipe(new AuthorizationFieldMiddleware($authenticationService, $authorizationService));
         $fieldMiddlewarePipe->pipe(new CostFieldMiddleware());
         $fieldMiddlewarePipe->pipe(new DirectiveFieldMiddleware($directiveAstBuilder));
@@ -432,7 +455,7 @@ class SchemaFactory
             $inputFieldMiddlewarePipe->pipe($inputFieldMiddleware);
         }
         // TODO: add a logger to the SchemaFactory and make use of it everywhere (and most particularly in SecurityInputFieldMiddleware)
-        $inputFieldMiddlewarePipe->pipe(new SecurityInputFieldMiddleware($expressionLanguage, $authenticationService, $authorizationService));
+        $inputFieldMiddlewarePipe->pipe(new SecurityInputFieldMiddleware($expressionLanguage, $authenticationService, $authorizationService, $callableResolver));
         $inputFieldMiddlewarePipe->pipe(new AuthorizationInputFieldMiddleware($authenticationService, $authorizationService));
         $inputFieldMiddlewarePipe->pipe(new DirectiveInputFieldMiddleware($directiveAstBuilder));
 
@@ -495,8 +518,9 @@ class SchemaFactory
             $fieldMiddlewarePipe,
             $inputFieldMiddlewarePipe,
             $descriptionResolver,
+            $fieldAccessorPrefixes,
         );
-        $parameterizedCallableResolver = new ParameterizedCallableResolver($fieldsBuilder, $this->container);
+        $parameterizedCallableResolver = new ParameterizedCallableResolver($fieldsBuilder, $callableResolver);
 
         foreach ($this->parameterMiddlewares as $parameterMapper) {
             $parameterMiddlewarePipe->pipe($parameterMapper);
